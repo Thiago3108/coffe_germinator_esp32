@@ -220,53 +220,80 @@ float distanciaAPorcentaje(float distancia_cm) {
 // =============================================================
 
 /**
- * Wrapper para hacer un HTTP POST que soporta tanto HTTP como HTTPS.
- * Devuelve el código de respuesta HTTP (o negativo si error).
+ * Wrapper para HTTP POST que soporta HTTP plano y HTTPS.
+ * Devuelve también el body de la respuesta (útil para diagnosticar errores).
+ *
+ * IMPORTANTE: WiFiClientSecure se declara en el scope de la función,
+ * NO dentro del if/else. Esto es porque http.begin(client, url) solo
+ * guarda una referencia al cliente; si el cliente se destruye antes
+ * de http.POST(), se lee memoria liberada y obtenemos basura (e.g. "100").
  */
-int httpPost(const String& url, const String& payload) {
+int httpPostConBody(const String& url, const String& payload, String& bodyOut) {
   HTTPClient http;
   http.setTimeout(TIMEOUT_HTTP_MS);
 
+  WiFiClientSecure clientSecure;    // ← vive durante toda la función
+  WiFiClient       clientPlano;
   bool ok;
+
   if (urlEsHttps()) {
-    WiFiClientSecure client;
-    client.setInsecure();   // Demo: no validamos cert. Para producción usar cert root real.
-    ok = http.begin(client, url);
+    clientSecure.setInsecure();     // Demo: no validamos cert TLS.
+    ok = http.begin(clientSecure, url);
   } else {
-    ok = http.begin(url);
+    ok = http.begin(clientPlano, url);
   }
-  if (!ok) return -1;
+  if (!ok) {
+    Serial.println("[HTTP] http.begin() falló");
+    return -1;
+  }
 
   http.addHeader("Content-Type", "application/json");
   http.addHeader("X-Device-Token", DEVICE_TOKEN);
+  http.addHeader("Accept", "application/json");
+  // User-Agent que algunos backends esperan
+  http.setUserAgent("ESP32-Germinador/1.0");
 
   int code = http.POST(payload);
+  bodyOut = http.getString();      // captura body para diagnóstico
   http.end();
   return code;
 }
 
+// Wrapper viejo mantenido por compatibilidad
+int httpPost(const String& url, const String& payload) {
+  String _ignored;
+  return httpPostConBody(url, payload, _ignored);
+}
+
 /**
- * Wrapper para HTTP GET con HTTPS opcional.
+ * Wrapper para HTTP GET. Mismo arreglo de scope que httpPost.
  * Si la respuesta es 200, llena `bodyOut`.
  */
 int httpGet(const String& url, String& bodyOut) {
   HTTPClient http;
   http.setTimeout(TIMEOUT_HTTP_MS);
 
+  WiFiClientSecure clientSecure;
+  WiFiClient       clientPlano;
   bool ok;
+
   if (urlEsHttps()) {
-    WiFiClientSecure client;
-    client.setInsecure();
-    ok = http.begin(client, url);
+    clientSecure.setInsecure();
+    ok = http.begin(clientSecure, url);
   } else {
-    ok = http.begin(url);
+    ok = http.begin(clientPlano, url);
   }
-  if (!ok) return -1;
+  if (!ok) {
+    Serial.println("[HTTP] http.begin() falló");
+    return -1;
+  }
 
   http.addHeader("X-Device-Token", DEVICE_TOKEN);
+  http.addHeader("Accept", "application/json");
+  http.setUserAgent("ESP32-Germinador/1.0");
 
   int code = http.GET();
-  if (code == 200) bodyOut = http.getString();
+  bodyOut = http.getString();      // capturamos siempre para diagnóstico
   http.end();
   return code;
 }
@@ -305,10 +332,14 @@ void enviarDatos() {
   serializeJson(doc, payload);
 
   String url = String(SERVER_BASE) + "/api/telemetria";
-  int code = httpPost(url, payload);
+  String respBody;
+  int code = httpPostConBody(url, payload, respBody);
 
   if (code > 0) {
     Serial.printf("[HTTP POST] %d\n", code);
+    if (code != 200 && code != 201) {
+      Serial.printf("[HTTP POST] Body: %s\n", respBody.c_str());
+    }
     if (code == 401 || code == 403) {
       Serial.println("[HTTP] Token inválido. Revisa secrets.h y env del backend.");
     }
@@ -330,7 +361,7 @@ void obtenerSetpoints() {
   int code = httpGet(url, body);
 
   if (code != 200) {
-    Serial.printf("[HTTP GET setpoints] %d\n", code);
+    Serial.printf("[HTTP GET setpoints] %d Body: %s\n", code, body.c_str());
     return;
   }
 
@@ -362,7 +393,7 @@ void obtenerOverrides() {
   int code = httpGet(url, body);
 
   if (code != 200) {
-    Serial.printf("[HTTP GET overrides] %d\n", code);
+    Serial.printf("[HTTP GET overrides] %d Body: %s\n", code, body.c_str());
     return;
   }
 
